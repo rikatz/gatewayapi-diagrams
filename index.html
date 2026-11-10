@@ -1,0 +1,1386 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gateway API — Interactive Route Explorer</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="https://noyitz.github.io/flowstory/templates/style.css">
+  <style>
+    .fs-panel { transition: transform .2s ease, background .3s, border-color .3s; }
+    .fs-flow-bar { gap: 8px; }
+    #fs-flow-select { flex: 1 0 100%; width: 100%; min-width: 0; }
+    .fs-flow-bar #fs-speed { flex: 0 0 70px; width: 70px; }
+    .fs-flow-bar button { min-height: 36px; }
+    #fs-panel-content { display: flex; min-height: 0; flex: 1; flex-direction: column; }
+    #fs-steps, #fs-inspector { min-height: 0; }
+    #fs-canvas { position: fixed; top: 0; left: 0; z-index: 0; display: block; }
+    #fs-highlight-box { z-index: 250 !important; }
+    #fs-overlay { z-index: 300 !important; }
+    #fs-overlay-card {
+      width: min(900px, calc(100vw - 400px)); max-width: none !important;
+      max-height: calc(100vh - 20px); overflow: auto;
+      background: var(--fs-bg-surface) !important; border-color: var(--fs-border) !important;
+      box-shadow: 0 12px 40px rgba(0,0,0,.35) !important;
+    }
+    body.sidebar-collapsed #fs-overlay-card { width: min(900px, calc(100vw - 40px)); }
+    #fs-overlay-desc, #fs-overlay-close { color: var(--fs-text-dim) !important; }
+    #fs-overlay-details > div span:first-child { color: var(--fs-text-dim) !important; }
+    #fs-overlay-details > div span:nth-child(2) { color: var(--fs-text) !important; }
+    .fs-yaml {
+      margin: 14px 0 0; padding: 18px; max-height: 56vh; overflow: auto;
+      border: 1px solid var(--fs-border); border-radius: 6px;
+      background: var(--fs-bg); color: var(--fs-text);
+      font: 14px/1.55 SFMono-Regular, Consolas, monospace; white-space: pre;
+    }
+    :root {
+      --fs-yaml-key:#79c0ff; --fs-yaml-string:#a5d6ff; --fs-yaml-kind:#d2a8ff;
+      --fs-yaml-literal:#f0883e; --fs-yaml-comment:#8b949e;
+    }
+    body.light {
+      --fs-yaml-key:#0550ae; --fs-yaml-string:#0a3069; --fs-yaml-kind:#6639ba;
+      --fs-yaml-literal:#953800; --fs-yaml-comment:#57606a;
+    }
+    .fs-yaml-key { color:var(--fs-yaml-key); font-weight:600; }
+    .fs-yaml-string { color:var(--fs-yaml-string); }
+    .fs-yaml-kind { color:var(--fs-yaml-kind); font-weight:600; }
+    .fs-yaml-literal { color:var(--fs-yaml-literal); font-weight:600; }
+    .fs-yaml-comment, .fs-yaml-punctuation { color:var(--fs-yaml-comment); }
+    #fs-panel-toggle {
+      position:fixed; top:16px; right:396px; z-index:201; width:36px; height:36px;
+      border:1px solid var(--fs-border); border-radius:8px;
+      background:var(--fs-bg-surface); color:var(--fs-text); cursor:pointer; font-size:18px;
+    }
+    .fs-theme-toggle { right:438px; }
+    body.sidebar-collapsed .fs-panel { transform:translateX(100%); }
+    body.sidebar-collapsed #fs-panel-toggle { right:60px; }
+    body.sidebar-collapsed .fs-theme-toggle { right:16px; }
+    body.sidebar-collapsed .fs-title { right:0; }
+    body.sidebar-collapsed #fs-overlay { right:0 !important; }
+    #fs-error { margin:16px; color:var(--fs-error); font:13px/1.5 monospace; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+  <button class="fs-theme-toggle" id="fs-theme" type="button" aria-label="Toggle theme">&#9790;</button>
+  <button id="fs-panel-toggle" type="button" aria-label="Hide sidebar" aria-expanded="true" title="Hide sidebar">&#8250;</button>
+  <div class="fs-brand" id="fs-brand"></div><div class="fs-title" id="fs-title"></div>
+  <aside class="fs-panel" aria-label="Diagram controls and details">
+    <div class="fs-flow-bar">
+      <select id="fs-flow-select" aria-label="Select Gateway API diagram or workflow"></select>
+      <button class="fs-start" id="fs-play" type="button">&#9654; Start</button>
+      <select id="fs-speed" aria-label="Playback speed">
+        <option value="1">1×</option><option value="2" selected>2×</option><option value="4">4×</option>
+      </select>
+      <button id="fs-mode" type="button" aria-pressed="false" title="Loop this workflow or rotate through all workflows">&#8635; Loop selection</button>
+      <button class="fs-reset" id="fs-reset" type="button">Reset</button>
+    </div>
+    <div id="fs-panel-content"></div>
+  </aside>
+  <div id="fs-canvas-host"></div>
+  <div class="fs-legend" id="fs-legend"></div>
+  <div id="fs-overlay-host"></div>
+
+  <script type="module">
+    import { FlowStory } from 'https://noyitz.github.io/flowstory/src/index.js';
+
+    const C = { request:'#58a6ff', response:'#3fb950', filter:'#f0883e', tls:'#d2a8ff', gateway:'#79c0ff', infra:'#8b949e', error:'#f85149' };
+    const legend = [
+      { label:'Request / connection', color:C.request }, { label:'Response', color:C.response },
+      { label:'Route filter / decision', color:C.filter }, { label:'TLS-encrypted traffic', color:C.tls },
+      { label:'Configuration reference', color:C.infra }
+    ];
+    const base = (id, label, nodes, tooltips, steps, inspector) => ({
+      meta:{ title:'Gateway API', author:'Illustrative flows based on Gateway API documentation' },
+      canvas:{ width:1250, height:900 }, nodes, tooltips,
+      flows:{ [id]:{ label, steps } }, flowOrder:[id], defaultFlow:id, legend,
+      inspector:inspector || { initialState:{ phase:'request', headers:[], body:[], cycleState:[] } }
+    });
+    const arrow = (text, from, to, color, num, edge={}) => ({ text, mode:'arrow', from, to, color, num, ...edge });
+    const light = (text, target, badge='✓') => ({ text, mode:'lightup', target, badge });
+    const tip = (title, description, yaml, details=[]) => ({ title, description, yaml, details });
+    const concept = (title, description, details=[]) => ({ title, description, details });
+    const line = (value, style='keep', id) => ({ value, style, id });
+    const gatewayClassYaml = (name='example') => `apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: ${name}
+spec:
+  controllerName: example.net/gateway-controller`;
+    const serviceYaml = ({ name, app, namespace='shop', port=8080, targetPort=port, protocol='TCP', portName='http' }) => `apiVersion: v1
+kind: Service
+metadata:
+  name: ${name}
+  namespace: ${namespace}
+spec:
+  selector:
+    app: ${app}
+  ports:
+    - name: ${portName}
+      protocol: ${protocol}
+      port: ${port}
+      targetPort: ${targetPort}`;
+    const podYaml = ({ name, app, namespace='shop', ports=[{ name:'http', port:8080, protocol:'TCP' }] }) => `apiVersion: v1
+kind: Pod
+metadata:
+  name: ${name}
+  namespace: ${namespace}
+  labels:
+    app: ${app}
+spec:
+  containers:
+    - name: ${app}
+      image: example.invalid/${app}:1.0
+      ports:
+${ports.map(p => `        - name: ${p.name}\n          containerPort: ${p.port}\n          protocol: ${p.protocol}`).join('\n')}`;
+
+    const diagrams = {
+      'ingress-before': base('ingress-before', 'Ingress · before', {
+        cluster:{ x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left' },
+        client:{ x:24,y:405,w:138,h:72,label:'Web client',sublabel:'outside the cluster',color:C.infra },
+        ingressClass:{ x:245,y:225,w:190,h:76,label:'IngressClass',sublabel:'selects controller',color:C.infra,inner:true },
+        ingress:{ x:480,y:225,w:210,h:88,label:'Ingress: shop',sublabel:'host + path + backend',color:C.filter,inner:true },
+        controller:{ x:245,y:410,w:210,h:78,label:'Ingress controller',sublabel:'implementation data plane',color:C.gateway,inner:true },
+        service:{ x:650,y:410,w:185,h:78,label:'Service: shop-svc',sublabel:'port 80 → 8080',color:C.request,inner:true },
+        pod:{ x:960,y:410,w:180,h:78,label:'Application Pod',sublabel:'app: shop',color:C.request,inner:true }
+      }, {
+        client:concept('Web client','External HTTP client; not a Kubernetes resource.',[['Request','shop.example.com/shop/items']]),
+        cluster:concept('Kubernetes cluster','Boundary for Kubernetes API resources and the illustrative in-cluster controller.'),
+        ingressClass:tip('IngressClass','Selects the Ingress controller. The Ingress API has no portable Gateway-style Listener.',`apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: legacy-ingress
+spec:
+  controller: example.net/ingress-controller`,[['API','networking.k8s.io/v1']]),
+        ingress:tip('Ingress','The old API places host, path, and backend selection on one resource. Its controller supplies the data plane.',`apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  ingressClassName: legacy-ingress
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /shop
+            pathType: Prefix
+            backend:
+              service:
+                name: shop-svc
+                port:
+                  number: 80`,[['Scope','HTTP / HTTPS'],['Mapping','Gateway + HTTPRoute']]),
+        controller:concept('Ingress controller data plane','An implementation-specific proxy or load balancer handles traffic; this is not a standard Ingress API resource.'),
+        service:tip('Service: shop-svc','The Ingress backend is a Kubernetes Service. It maps port 80 to the Pod target port.',serviceYaml({name:'shop-svc',app:'shop',port:80,targetPort:8080})),
+        pod:tip('Application Pod','Illustrative backend Pod selected by the Service.',podYaml({name:'shop-pod',app:'shop',ports:[{name:'http',port:8080,protocol:'TCP'}]}))
+      }, [
+        light('IngressClass selects the controller implementation.','ingressClass'),
+        light('Ingress holds the host, path, and Service backend in one API object.','ingress'),
+        arrow('The client sends an HTTP request to the controller-provided entry point.','client','controller',C.request,1,{fromRight:true,toLeft:true}),
+        arrow('The Ingress controller applies the host/path rule and forwards to the Service.','controller','service',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects a matching application Pod.','service','pod',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The Pod response returns through the Service.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The controller relays the response to the client.','service','controller',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives the HTTP response.','controller','client',C.response,6,{fromLeft:true,toRight:true})
+      ], { initialState:{phase:'request',headers:[line('GET /shop/items HTTP/1.1','keep','request'),line('Host: shop.example.com','keep','host')],body:[],cycleState:[]} }),
+
+      'ingress-after': base('ingress-after','Ingress · Gateway API equivalent',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:405,w:138,h:72,label:'Web client',sublabel:'outside the cluster',color:C.infra},
+        gatewayClass:{x:230,y:225,w:190,h:76,label:'GatewayClass',sublabel:'selects controller',color:C.infra,inner:true},
+        gateway:{x:475,y:390,w:190,h:82,label:'Gateway: shop-gw',sublabel:'listener: HTTP :80',color:C.gateway,inner:true},
+        route:{x:475,y:570,w:220,h:80,label:'HTTPRoute: shop',sublabel:'backendRefs → shop-svc',color:C.request,inner:true},
+        service:{x:790,y:390,w:175,h:78,label:'Service: shop-svc',sublabel:'port 80',color:C.request,inner:true},
+        pod:{x:1030,y:390,w:160,h:78,label:'Application Pod',sublabel:'app: shop',color:C.request,inner:true}
+      },{
+        client:concept('Web client','External HTTP client; not a Kubernetes resource.'), cluster:concept('Kubernetes cluster','Gateway API resources and illustrative workload.'),
+        gatewayClass:tip('GatewayClass','A cluster-scoped resource selects the Gateway controller.',gatewayClassYaml(),[['Scope','Cluster']]),
+        gateway:tip('Gateway','The operator requests an entry point and declares a Listener. The implementation provisions the data plane.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shop-gw
+  namespace: shop
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: web
+      hostname: shop.example.com
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute`),
+        route:tip('HTTPRoute','The Gateway API counterpart to the Ingress rule. It attaches via parentRefs and references the Service through backendRefs.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  parentRefs:
+    - name: shop-gw
+      sectionName: web
+  hostnames:
+    - shop.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /shop
+      backendRefs:
+        - name: shop-svc
+          port: 80`,[['Ingress host/path','HTTPRoute hostnames + matches'],['Backend','Service via backendRefs']]),
+        service:tip('Service: shop-svc','Gateway API can continue to use the existing Service backend.',serviceYaml({name:'shop-svc',app:'shop',port:80,targetPort:8080})),
+        pod:tip('Application Pod','Illustrative backend Pod selected by the Service.',podYaml({name:'shop-pod',app:'shop',ports:[{name:'http',port:8080,protocol:'TCP'}]}))
+      },[
+        light('GatewayClass selects the controller implementation.','gatewayClass'),
+        light('Gateway declares the HTTP entry point as a named Listener.','gateway','HTTP'),
+        light('HTTPRoute attaches to that Listener and maps the same host/path to shop-svc.','route'),
+        arrow('The same client request reaches the Gateway address.','client','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        arrow('The Gateway applies the attached HTTPRoute and forwards to the referenced Service.','gateway','service',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects the application Pod.','service','pod',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The Pod response returns through the Service.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The Gateway relays the response to the client.','service','gateway',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives the response.','gateway','client',C.response,6,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('GET /shop/items HTTP/1.1','keep','request'),line('Host: shop.example.com','keep','host')],body:[],cycleState:[]}}),
+
+      'gateway-basics': base('gateway-basics','Gateway basics',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:405,w:138,h:72,label:'Web client',sublabel:'outside the cluster',color:C.infra},
+        gatewayClass:{x:230,y:230,w:195,h:78,label:'GatewayClass',sublabel:'one controller',color:C.infra,inner:true},
+        gateway:{x:475,y:390,w:190,h:82,label:'Gateway',sublabel:'address + Listeners',color:C.gateway,inner:true},
+        route:{x:475,y:570,w:220,h:80,label:'HTTPRoute',sublabel:'backendRefs → app-svc',color:C.request,inner:true},
+        service:{x:790,y:390,w:175,h:78,label:'Service',sublabel:'backendRef target',color:C.request,inner:true},
+        pod:{x:1030,y:390,w:160,h:78,label:'Pod',sublabel:'selected by Service',color:C.request,inner:true}
+      },{
+        client:concept('Web client','An external client sends traffic to a Gateway address.'),
+        cluster:concept('Kubernetes cluster','Gateway API resources configure a controller-managed data plane; the boundary is explanatory.'),
+        gatewayClass:tip('GatewayClass','A cluster-scoped resource identifies the controller that implements this class of Gateways.',gatewayClassYaml(),[['Role','Infrastructure provider / cluster operator']]),
+        gateway:tip('Gateway','Requests an address and defines named Listeners. The controller provisions and reports the data plane.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: web-gateway
+  namespace: shop
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: web
+      hostname: app.example.com
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute`,[['Role','Cluster operator / application admin']]),
+        route:tip('HTTPRoute','Application developers declare host/path matches and backend references. Routes attach only when a Listener permits them.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app
+  namespace: shop
+spec:
+  parentRefs:
+    - name: web-gateway
+      sectionName: web
+  hostnames:
+    - app.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: app-svc
+          port: 8080`,[['Role','Application developer']]),
+        service:tip('Service','The HTTPRoute references a Service backend.',serviceYaml({name:'app-svc',app:'app'})),
+        pod:tip('Application Pod','The selected workload endpoint; a destination, not a Gateway API Route.',podYaml({name:'app-pod',app:'app'}))
+      },[
+        light('GatewayClass names the controller that implements this class.','gatewayClass'),
+        light('Gateway requests infrastructure and declares its Listener contract.','gateway'),
+        light('HTTPRoute attaches using parentRefs; allowedRoutes constrains attachment.','route'),
+        arrow('A client request arrives at the Gateway Listener.','client','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        arrow('The Gateway applies the matching Route configuration and forwards to its backendRef.','gateway','service',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects a Pod endpoint.','service','pod',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The response travels back through the Service and Gateway.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The Gateway relays the response to the client.','service','gateway',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives the response.','gateway','client',C.response,6,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('GET / HTTP/1.1','keep','request'),line('Host: app.example.com','keep','host')],body:[],cycleState:[]}}),
+
+      'http-match': base('http-match','HTTPRoute · host and path matching',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:405,w:138,h:72,label:'Web client',sublabel:'shop.example.com',color:C.infra},
+        gateway:{x:250,y:395,w:185,h:82,label:'Gateway: web',sublabel:'HTTP :80',color:C.gateway,inner:true},
+        route:{x:485,y:235,w:230,h:86,label:'HTTPRoute: shop',sublabel:'backendRefs → shop-svc',color:C.request,inner:true},
+        service:{x:735,y:395,w:185,h:78,label:'Service: shop-svc',sublabel:':8080',color:C.request,inner:true},
+        pod:{x:1015,y:395,w:175,h:78,label:'Shop Pod',sublabel:'app: shop',color:C.request,inner:true}
+      },{
+        client:concept('Web client','Sends an HTTP request with a host and path.',[['Request','GET /shop/items']]),
+        cluster:concept('Kubernetes cluster','Gateway and workload resources for this HTTP example.'),
+        gateway:tip('Gateway','Its HTTP Listener accepts this hostname and permits HTTPRoute attachment.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: web
+  namespace: shop
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: http
+      hostname: shop.example.com
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute`),
+        route:tip('HTTPRoute: shop','The Gateway intersects Route hostnames with Listener hostnames, then evaluates rule matches. The Route is configuration, not a network hop.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  parentRefs:
+    - name: web
+      sectionName: http
+  hostnames:
+    - shop.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /shop
+      backendRefs:
+        - name: shop-svc
+          port: 8080`,[['Hostname','shop.example.com'],['Path','PathPrefix /shop']]),
+        service:tip('Service: shop-svc','The matched HTTPRoute forwards traffic to this Service port.',serviceYaml({name:'shop-svc',app:'shop'})),
+        pod:tip('Shop Pod','Illustrative Pod selected by shop-svc.',podYaml({name:'shop-pod',app:'shop'}))
+      },[
+        arrow('The client sends GET /shop/items with Host: shop.example.com.','client','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        light('The Gateway matches Listener hostname, then HTTPRoute hostname and PathPrefix.','route'),
+        arrow('The programmed Gateway forwards the matching request to shop-svc.','gateway','service',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects a Pod endpoint.','service','pod',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The Pod returns an HTTP response.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The response returns through the Gateway to the client.','service','gateway',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives the response.','gateway','client',C.response,6,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('GET /shop/items HTTP/1.1','keep','request'),line('Host: shop.example.com','keep','host')],body:[],cycleState:[]}}),
+
+      'http-filter-rewrite': base('http-filter-rewrite','HTTPRoute · headers + path rewrite',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:415,w:138,h:72,label:'Web client',sublabel:'outside cluster',color:C.infra},
+        gateway:{x:235,y:405,w:180,h:82,label:'Gateway: web',sublabel:'HTTP :80',color:C.gateway,inner:true},
+        route:{x:470,y:230,w:240,h:88,label:'HTTPRoute: store',sublabel:'backendRefs → store-svc',color:C.request,inner:true},
+        filter:{x:480,y:565,w:220,h:76,type:'plugin',label:'Inline HTTPRoute filters',sublabel:'add header · rewrite path',color:C.filter,inner:true},
+        service:{x:760,y:405,w:175,h:78,label:'Service: store-svc',sublabel:':8080',color:C.request,inner:true},
+        pod:{x:1020,y:405,w:170,h:78,label:'Store Pod',sublabel:'app: store',color:C.request,inner:true}
+      },{
+        client:concept('Web client','Sends the original path and request headers.'),
+        cluster:concept('Kubernetes cluster','The filter is configured inline on HTTPRoute; it is not a separate resource.'),
+        gateway:tip('Gateway','Receives HTTP and applies the attached Route configuration.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: web
+  namespace: shop
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute`),
+        route:tip('HTTPRoute: store','RequestHeaderModifier and URLRewrite are filters on the HTTPRoute rule. RequestHeaderModifier is Core at rule scope; URLRewrite is Extended.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: store
+  namespace: shop
+spec:
+  parentRefs:
+    - name: web
+      sectionName: http
+  hostnames:
+    - shop.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /store
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            add:
+              - name: X-Gateway-Route
+                value: store
+            remove:
+              - X-Internal-Debug
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /catalog
+      backendRefs:
+        - name: store-svc
+          port: 8080`,[['Header filter','RequestHeaderModifier'],['Rewrite','URLRewrite · Extended']]),
+        filter:concept('Inline HTTPRoute filters','A visual explanation of filter processing, not a standalone Kubernetes object. The manifest is on the HTTPRoute node.',[['Adds','X-Gateway-Route: store'],['Removes','X-Internal-Debug'],['Rewrites','/store/items → /catalog/items']]),
+        service:tip('Service: store-svc','Receives the rewritten request after Gateway processing.',serviceYaml({name:'store-svc',app:'store'})),
+        pod:tip('Store Pod','Illustrative Pod selected by store-svc.',podYaml({name:'store-pod',app:'store'}))
+      },[
+        arrow('The client sends GET /store/items with a debug header.','client','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        light('The HTTPRoute matches /store and selects its inline filters.','route'),
+        light('RequestHeaderModifier and URLRewrite update the request.','filter'),
+        arrow('The Gateway applies the filter effects before forwarding.','gateway','filter',C.filter,2,{fromBottom:true,toTop:true}),
+        arrow('The rewritten request continues to store-svc.','filter','service',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The Service selects the Store Pod.','service','pod',C.request,4,{fromRight:true,toLeft:true}),
+        arrow('The Pod response returns through the Service.','pod','service',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The Gateway relays the response to the client.','service','gateway',C.response,6,{fromLeft:true,toRight:true}),
+        arrow('The client receives the response.','gateway','client',C.response,7,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('GET /store/items HTTP/1.1','keep','request'),line('Host: shop.example.com','keep','host'),line('X-Internal-Debug: trace','keep','debug')],body:[],cycleState:[]},mutations:{'http-filter-rewrite':[{step:3,label:'HTTPRoute filter effects',phase:'request',replaceHeaders:[line('GET /items HTTP/1.1','highlight','request'),line('Host: shop.example.com','keep','host'),line('X-Gateway-Route: store','add','route'),line('X-Internal-Debug: trace','del','debug')]}]}}),
+
+      'http-redirect': base('http-redirect','HTTPRoute · redirect vs forwarding',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:425,w:138,h:72,label:'Web client',sublabel:'HTTP then HTTPS',color:C.infra},
+        gateway:{x:245,y:395,w:190,h:82,label:'Gateway: web',sublabel:'HTTP :80 · HTTPS :443',color:C.gateway,inner:true},
+        redirectRoute:{x:470,y:230,w:230,h:82,label:'HTTPRoute: redirect',sublabel:'RequestRedirect · 301',color:C.filter,inner:true},
+        httpsRoute:{x:470,y:540,w:230,h:82,label:'HTTPRoute: secure',sublabel:'backendRefs → shop-svc',color:C.request,inner:true},
+        secret:{x:760,y:235,w:185,h:76,label:'TLS Secret',sublabel:'certificate for HTTPS',color:C.tls,inner:true},
+        service:{x:765,y:430,w:175,h:78,label:'Service: shop-svc',sublabel:':8080',color:C.request,inner:true},
+        pod:{x:1025,y:430,w:165,h:78,label:'Shop Pod',sublabel:'app: shop',color:C.request,inner:true}
+      },{
+        client:concept('Web client','A redirect is a response to the client. The client, not the Gateway, makes the follow-up HTTPS request.'),
+        cluster:concept('Kubernetes cluster','One HTTPRoute returns a redirect; a separate HTTPRoute forwards the new HTTPS request.'),
+        gateway:tip('Gateway','The HTTP Listener receives the first request. The HTTPS Listener terminates TLS using the referenced Secret.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: web
+  namespace: shop
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute
+    - name: https
+      hostname: shop.example.com
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: shop-cert
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute`),
+        redirectRoute:tip('HTTPRoute: redirect','RequestRedirect returns a 301 Location response; it does not proxy the original request to a backend. RequestRedirect and URLRewrite cannot share a rule.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: redirect
+  namespace: shop
+spec:
+  parentRefs:
+    - name: web
+      sectionName: http
+  hostnames:
+    - shop.example.com
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301`,[['Result','301 + Location'],['Backend','None on redirect rule']]),
+        httpsRoute:tip('HTTPRoute: secure','The client follows the redirect with a new HTTPS request. This separate Route forwards it to shop-svc.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: secure
+  namespace: shop
+spec:
+  parentRefs:
+    - name: web
+      sectionName: https
+  hostnames:
+    - shop.example.com
+  rules:
+    - backendRefs:
+        - name: shop-svc
+          port: 8080`),
+        secret:tip('Secret: shop-cert','Certificate and key bytes are redacted.',`apiVersion: v1
+kind: Secret
+metadata:
+  name: shop-cert
+  namespace: shop
+type: kubernetes.io/tls
+data:
+  tls.crt: "<redacted base64 certificate>"
+  tls.key: "<redacted base64 private key>"`),
+        service:tip('Service: shop-svc','The HTTPS Route forwards the client’s second request to this Service.',serviceYaml({name:'shop-svc',app:'shop'})),
+        pod:tip('Shop Pod','Illustrative backend Pod selected by shop-svc.',podYaml({name:'shop-pod',app:'shop'}))
+      },[
+        arrow('The client sends an HTTP request to port 80.','client','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        light('The HTTP Listener matches the redirect HTTPRoute.','redirectRoute'),
+        arrow('The Gateway returns 301 Location: https://shop.example.com/shop.','gateway','client',C.response,2,{fromLeft:true,toRight:true}),
+        arrow('The client follows with a new HTTPS request.','client','gateway',C.tls,3,{fromRight:true,toLeft:true,yOff:18}),
+        light('The HTTPS Listener terminates TLS using shop-cert.','secret'),
+        light('The secure HTTPRoute forwards the decrypted HTTP request.','httpsRoute'),
+        arrow('The Gateway proxies the request to shop-svc.','gateway','service',C.request,4,{fromRight:true,toLeft:true}),
+        arrow('The Service selects the Shop Pod.','service','pod',C.request,5,{fromRight:true,toLeft:true}),
+        arrow('The Pod returns the application response.','pod','service',C.response,6,{fromLeft:true,toRight:true}),
+        arrow('The Gateway encrypts and relays the HTTPS response.','service','gateway',C.response,7,{fromLeft:true,toRight:true}),
+        arrow('The client receives the HTTPS response.','gateway','client',C.response,8,{fromLeft:true,toRight:true,yOff:18})
+      ],{initialState:{phase:'request',headers:[line('GET /shop HTTP/1.1','keep','request'),line('Host: shop.example.com','keep','host')],body:[],cycleState:[]},mutations:{'http-redirect':[
+        {step:3,label:'Gateway returns a redirect',phase:'response',replaceHeaders:[line('HTTP/1.1 301 Moved Permanently','highlight','status'),line('Location: https://shop.example.com/shop','add','location')]},
+        {step:4,label:'Client makes a new HTTPS request',phase:'request',replaceHeaders:[line('GET /shop HTTP/2','highlight','request'),line(':authority: shop.example.com','keep','authority'),line('TLS: encrypted to Gateway','keep','tls')]},
+        {step:11,label:'HTTPS response from the application',phase:'response',replaceHeaders:[line('HTTP/2 200','highlight','status'),line('Content-Type: text/html','keep','content')]}
+      ]}}),
+
+      'http-split': base('http-split','HTTPRoute · weighted traffic split',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        traffic:{x:24,y:405,w:138,h:72,label:'Request stream',sublabel:'many requests over time',color:C.infra},
+        gateway:{x:250,y:405,w:180,h:82,label:'Gateway: web',sublabel:'HTTP :80',color:C.gateway,inner:true},
+        route:{x:485,y:230,w:230,h:88,label:'HTTPRoute: shop',sublabel:'90 stable · 10 canary',color:C.request,inner:true},
+        stable:{x:745,y:315,w:185,h:78,label:'Service: stable',sublabel:'weight: 90',color:C.request,inner:true},
+        stablePod:{x:1010,y:315,w:180,h:78,label:'Stable Pod',sublabel:'app: shop-v1',color:C.request,inner:true},
+        canary:{x:745,y:525,w:185,h:78,label:'Service: canary',sublabel:'weight: 10',color:C.filter,inner:true},
+        canaryPod:{x:1010,y:525,w:180,h:78,label:'Canary Pod',sublabel:'app: shop-v2',color:C.filter,inner:true}
+      },{
+        traffic:concept('Request stream','Branches represent traffic shares across many requests, not two destinations for one request.'),
+        cluster:concept('Kubernetes cluster','Each backend Service selects its own application version.'),
+        gateway:tip('Gateway','Receives HTTP traffic and applies its attached HTTPRoute.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: web
+  namespace: shop
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute`),
+        route:tip('HTTPRoute: weighted backends','Weights divide traffic proportionally over many requests. They are not a deterministic per-request sequence.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  parentRefs:
+    - name: web
+      sectionName: http
+  hostnames:
+    - shop.example.com
+  rules:
+    - backendRefs:
+        - name: stable
+          port: 8080
+          weight: 90
+        - name: canary
+          port: 8080
+          weight: 10`,[['Stable share','90 / 100'],['Canary share','10 / 100']]),
+        stable:tip('Service: stable','Receives approximately 90% of requests over time.',serviceYaml({name:'stable',app:'shop-v1'})),
+        stablePod:tip('Stable Pod','Illustrative v1 Pod selected by stable.',podYaml({name:'shop-v1-pod',app:'shop-v1'})),
+        canary:tip('Service: canary','Receives approximately 10% of requests over time.',serviceYaml({name:'canary',app:'shop-v2'})),
+        canaryPod:tip('Canary Pod','Illustrative v2 Pod selected by canary.',podYaml({name:'shop-v2-pod',app:'shop-v2'}))
+      },[
+        arrow('A stream of requests arrives at the Gateway.','traffic','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        light('HTTPRoute selects two backendRefs with weights 90 and 10.','route'),
+        arrow('Across many requests, the stable backend receives about 90 shares.','gateway','stable',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('Across many requests, the canary backend receives about 10 shares.','gateway','canary',C.filter,3,{fromRight:true,toLeft:true}),
+        arrow('The stable Service selects a v1 Pod.','stable','stablePod',C.request,4,{fromRight:true,toLeft:true}),
+        arrow('The canary Service selects a v2 Pod.','canary','canaryPod',C.filter,5,{fromRight:true,toLeft:true})
+      ],{initialState:{phase:'request',headers:[line('GET /shop HTTP/1.1','keep','request'),line('Host: shop.example.com','keep','host')],body:[],cycleState:[]}}),
+
+      'grpc-method': base('grpc-method','GRPCRoute · service + method',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:405,w:138,h:72,label:'gRPC client',sublabel:'HTTP/2 over TLS',color:C.infra},
+        gateway:{x:245,y:395,w:190,h:82,label:'Gateway: grpc',sublabel:'HTTPS :50051',color:C.gateway,inner:true},
+        route:{x:490,y:235,w:235,h:88,label:'GRPCRoute: users',sublabel:'Login · backend: users',color:C.request,inner:true},
+        secret:{x:505,y:590,w:195,h:76,label:'TLS Secret',sublabel:'Gateway certificate',color:C.tls,inner:true},
+        service:{x:770,y:395,w:185,h:78,label:'Service: users',sublabel:':50051',color:C.request,inner:true},
+        pod:{x:1030,y:395,w:165,h:78,label:'gRPC Pod',sublabel:'app: users',color:C.request,inner:true}
+      },{
+        client:concept('gRPC client','Makes an RPC using HTTP/2. The conventional path is /service/method.'),
+        cluster:concept('Kubernetes cluster','The HTTPS Listener terminates client TLS; GRPCRoute matches gRPC method metadata.'),
+        gateway:tip('Gateway','Exposes an HTTPS Listener and terminates TLS with a Secret. The Listener permits GRPCRoute attachment.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: grpc
+  namespace: shop
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: grpc
+      hostname: api.example.com
+      protocol: HTTPS
+      port: 50051
+      tls:
+        certificateRefs:
+          - kind: Secret
+            name: api-cert
+      allowedRoutes:
+        kinds:
+          - kind: GRPCRoute`),
+        route:tip('GRPCRoute','Prefer GRPCRoute for gRPC-aware matching and features. It matches service/method directly; HTTPRoute can handle basic gRPC routing.',`apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: users
+  namespace: shop
+spec:
+  parentRefs:
+    - name: grpc
+      sectionName: grpc
+  hostnames:
+    - api.example.com
+  rules:
+    - matches:
+        - method:
+            service: com.example.User
+            method: Login
+      backendRefs:
+        - name: users
+          port: 50051`,[['Match','com.example.User / Login'],['Route type','GRPCRoute · Standard']]),
+        secret:tip('Secret: api-cert','Certificate Secret used by the HTTPS Listener. Certificate material is omitted.',`apiVersion: v1
+kind: Secret
+metadata:
+  name: api-cert
+  namespace: shop
+type: kubernetes.io/tls
+data:
+  tls.crt: "<redacted base64 certificate>"
+  tls.key: "<redacted base64 private key>"`),
+        service:tip('Service: users','The matched RPC is forwarded to this Service port.',serviceYaml({name:'users',app:'users',port:50051,targetPort:'grpc',portName:'grpc'})),
+        pod:tip('gRPC Pod','Illustrative application Pod listening for gRPC on port 50051.',podYaml({name:'users-pod',app:'users',ports:[{name:'grpc',port:50051,protocol:'TCP'}]}))
+      },[
+        arrow('The client opens an HTTP/2 gRPC request to api.example.com:50051.','client','gateway',C.tls,1,{fromRight:true,toLeft:true}),
+        light('The Gateway terminates TLS using api-cert.','secret'),
+        light('GRPCRoute matches com.example.User / Login.','route'),
+        arrow('The Gateway forwards the RPC to the users Service.','gateway','service',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects a gRPC Pod.','service','pod',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The Pod returns the gRPC response.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The Gateway relays the response over the client TLS connection.','service','gateway',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives grpc-status: 0.','gateway','client',C.response,6,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('POST /com.example.User/Login HTTP/2','keep','request'),line(':authority: api.example.com','keep','authority'),line('content-type: application/grpc','keep','content-type')],body:[],cycleState:[]},mutations:{'grpc-method':[{step:8,label:'Successful gRPC response',phase:'response',replaceHeaders:[line(':status: 200','highlight','status'),line('grpc-status: 0','add','grpc-status')]}]}}),
+
+      'tls-terminate': base('tls-terminate','TLS · HTTPS termination',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:405,w:138,h:72,label:'HTTPS client',sublabel:'TLS encrypted',color:C.infra},
+        gateway:{x:245,y:395,w:190,h:82,label:'Gateway: web',sublabel:'HTTPS :443 · Terminate',color:C.gateway,inner:true},
+        route:{x:490,y:235,w:235,h:84,label:'HTTPRoute: app',sublabel:'HTTP visible after termination',color:C.request,inner:true},
+        secret:{x:495,y:595,w:195,h:76,label:'TLS Secret',sublabel:'frontend certificate',color:C.tls,inner:true},
+        service:{x:770,y:395,w:180,h:78,label:'Service: app-svc',sublabel:':8080',color:C.request,inner:true},
+        pod:{x:1030,y:395,w:165,h:78,label:'Application Pod',sublabel:'app: web',color:C.request,inner:true}
+      },{
+        client:concept('HTTPS client','Starts a TLS connection to the Gateway; this is the downstream connection.'),
+        cluster:concept('Kubernetes cluster','TLS termination at the Gateway allows HTTPRoute to inspect HTTP host, path, headers, and method.'),
+        gateway:tip('Gateway: HTTPS termination','The HTTPS Listener terminates downstream TLS with a certificate Secret. Upstream TLS is configured independently.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: web
+  namespace: shop
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: https
+      hostname: app.example.com
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: app-cert
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute`),
+        route:tip('HTTPRoute: app','After Gateway termination, HTTPRoute can match HTTP-level properties such as hostname and path.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app
+  namespace: shop
+spec:
+  parentRefs:
+    - name: web
+      sectionName: https
+  hostnames:
+    - app.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: app-svc
+          port: 8080`,[['Downstream','TLS terminated at Gateway'],['HTTP routing','Available after termination']]),
+        secret:tip('Secret: app-cert','Certificate and private key used by the Gateway HTTPS Listener; material is redacted.',`apiVersion: v1
+kind: Secret
+metadata:
+  name: app-cert
+  namespace: shop
+type: kubernetes.io/tls
+data:
+  tls.crt: "<redacted base64 certificate>"
+  tls.key: "<redacted base64 private key>"`),
+        service:tip('Service: app-svc','The Gateway forwards HTTP to this backend Service. Backend TLS, if needed, is configured independently.',serviceYaml({name:'app-svc',app:'web'})),
+        pod:tip('Application Pod','Illustrative application endpoint selected by app-svc.',podYaml({name:'web-pod',app:'web'}))
+      },[
+        arrow('The client sends HTTPS; TLS protects the downstream connection.','client','gateway',C.tls,1,{fromRight:true,toLeft:true}),
+        light('The Gateway terminates TLS using app-cert.','secret'),
+        light('The decrypted HTTP request can now match the HTTPRoute.','route'),
+        arrow('The Gateway forwards the request to app-svc.','gateway','service',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects the application Pod.','service','pod',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The Pod response returns through the Service.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The Gateway encrypts and returns the HTTPS response.','service','gateway',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives the response over TLS.','gateway','client',C.response,6,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('GET / HTTP/2','keep','request'),line(':authority: app.example.com','keep','authority'),line('TLS: encrypted','keep','tls')],body:[],cycleState:[]},mutations:{'tls-terminate':[{step:3,label:'TLS is terminated; HTTP fields are visible',phase:'request',replaceHeaders:[line('GET / HTTP/2','highlight','request'),line(':authority: app.example.com','keep','authority'),line('TLS: terminated at Gateway','del','tls')]}]}}),
+
+      'tls-passthrough': base('tls-passthrough','TLS · SNI passthrough',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:405,w:138,h:72,label:'TLS client',sublabel:'SNI: api.example.com',color:C.infra},
+        gateway:{x:245,y:395,w:190,h:82,label:'Gateway: tls',sublabel:'TLS :443 · Passthrough',color:C.gateway,inner:true},
+        route:{x:490,y:235,w:235,h:84,label:'TLSRoute: api',sublabel:'backendRefs → tls-svc',color:C.request,inner:true},
+        service:{x:770,y:395,w:180,h:78,label:'Service: tls-svc',sublabel:':443 → :8443',color:C.request,inner:true},
+        pod:{x:1030,y:395,w:165,h:78,label:'TLS backend Pod',sublabel:'terminates TLS',color:C.tls,inner:true}
+      },{
+        client:concept('TLS client','The TLS handshake includes SNI. Application data remains encrypted through the Gateway.'),
+        cluster:concept('Kubernetes cluster','With Passthrough, Gateway routes on TLS metadata but does not terminate the TLS connection.'),
+        gateway:tip('Gateway: TLS passthrough','The TLS Listener uses Passthrough and permits TLSRoute attachment. It does not need a frontend certificate.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: tls
+  namespace: shop
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: tls
+      hostname: api.example.com
+      port: 443
+      protocol: TLS
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        kinds:
+          - kind: TLSRoute`),
+        route:tip('TLSRoute: api','TLSRoute matches SNI hostname and forwards the encrypted stream. It cannot inspect HTTP paths or headers.',`apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: api
+  namespace: shop
+spec:
+  parentRefs:
+    - name: tls
+      sectionName: tls
+  hostnames:
+    - api.example.com
+  rules:
+    - backendRefs:
+        - name: tls-svc
+          port: 443`,[['Match','SNI: api.example.com'],['Payload','Still encrypted']]),
+        service:tip('Service: tls-svc','The TLSRoute forwards the encrypted connection to this Service.',serviceYaml({name:'tls-svc',app:'tls-app',port:443,targetPort:8443,portName:'tls'})),
+        pod:tip('TLS backend Pod','The backend application terminates the original TLS connection.',podYaml({name:'tls-pod',app:'tls-app',ports:[{name:'tls',port:8443,protocol:'TCP'}]}))
+      },[
+        arrow('The client starts TLS with SNI api.example.com.','client','gateway',C.tls,1,{fromRight:true,toLeft:true}),
+        light('TLSRoute matches SNI; the Gateway does not decrypt payload data.','route'),
+        arrow('Gateway forwards the still-encrypted TLS stream to tls-svc.','gateway','service',C.tls,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects the TLS backend Pod.','service','pod',C.tls,3,{fromRight:true,toLeft:true}),
+        arrow('The backend terminates TLS and sends its response back.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The response returns through the Gateway.','service','gateway',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives the TLS response.','gateway','client',C.response,6,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('TLS ClientHello','keep','hello'),line('SNI: api.example.com','highlight','sni'),line('HTTP headers: encrypted / not visible','keep','opaque')],body:[],cycleState:[]}}),
+
+      'tcp-dns': base('tcp-dns','TCPRoute · DNS over TCP :53',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:405,w:138,h:72,label:'DNS client',sublabel:'TCP connection',color:C.infra},
+        gateway:{x:245,y:395,w:195,h:82,label:'Gateway: dns',sublabel:'TCP listener :53',color:C.gateway,inner:true},
+        route:{x:485,y:235,w:220,h:84,label:'TCPRoute: dns-tcp',sublabel:'backendRefs → dns-tcp',color:C.request,inner:true},
+        service:{x:765,y:395,w:185,h:78,label:'Service: dns-tcp',sublabel:'TCP :53',color:C.request,inner:true},
+        pod:{x:1030,y:395,w:165,h:78,label:'DNS Pod',sublabel:'TCP + UDP :53',color:C.request,inner:true}
+      },{
+        client:concept('DNS client','A DNS query over TCP is a connection-oriented stream and uses port 53.'),
+        cluster:concept('Kubernetes cluster','TCP and UDP have separate named Listeners and Routes on the same Gateway port. Co-hosting both on one address depends on implementation support.'),
+        gateway:tip('Gateway: DNS listeners','TCP and UDP Listeners are distinct by protocol even when they share port 53. Implementations vary in support for serving both on one address.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: dns
+  namespace: dns
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: dns-tcp
+      protocol: TCP
+      port: 53
+      allowedRoutes:
+        kinds:
+          - kind: TCPRoute
+    - name: dns-udp
+      protocol: UDP
+      port: 53
+      allowedRoutes:
+        kinds:
+          - kind: UDPRoute`,[['Implementation support','TCP + UDP on one Gateway address is optional']]),
+        route:tip('TCPRoute: dns-tcp','TCPRoute selects a Listener via parentRefs.sectionName and forwards a TCP stream. It has no L7 host, path, or header matches.',`apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: dns-tcp
+  namespace: dns
+spec:
+  parentRefs:
+    - name: dns
+      sectionName: dns-tcp
+  rules:
+    - backendRefs:
+        - name: dns-tcp
+          port: 53`,[['Transport','TCP connection'],['Gateway port','53']]),
+        service:tip('Service: dns-tcp','Separate TCP Service targets the DNS Pod TCP port.',serviceYaml({name:'dns-tcp',app:'dns',namespace:'dns',port:53,targetPort:'dns-tcp',protocol:'TCP',portName:'dns-tcp'})),
+        pod:tip('DNS Pod','The illustrative DNS Pod exposes distinct TCP and UDP container ports.',podYaml({name:'dns-pod',app:'dns',namespace:'dns',ports:[{name:'dns-tcp',port:53,protocol:'TCP'},{name:'dns-udp',port:53,protocol:'UDP'}]}))
+      },[
+        arrow('The client opens a TCP connection to Gateway port 53.','client','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        light('The Gateway selects its TCP Listener, not the UDP Listener.','gateway','TCP'),
+        light('TCPRoute attaches to dns-tcp by sectionName.','route'),
+        arrow('The Gateway forwards the TCP stream to the TCP Service.','gateway','service',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects the DNS Pod TCP port.','service','pod',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The DNS response returns over the TCP connection.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The Gateway relays the TCP response to the client.','service','gateway',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives the DNS response.','gateway','client',C.response,6,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('DNS query','keep','query'),line('Transport: TCP','highlight','protocol'),line('Destination: :53','keep','port')],body:[],cycleState:[]}}),
+
+      'udp-dns': base('udp-dns','UDPRoute · DNS over UDP :53',{
+        cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:24,y:405,w:138,h:72,label:'DNS client',sublabel:'UDP datagram',color:C.infra},
+        gateway:{x:245,y:395,w:195,h:82,label:'Gateway: dns',sublabel:'UDP listener :53',color:C.gateway,inner:true},
+        route:{x:485,y:235,w:220,h:84,label:'UDPRoute: dns-udp',sublabel:'backendRefs → dns-udp',color:C.request,inner:true},
+        service:{x:765,y:395,w:185,h:78,label:'Service: dns-udp',sublabel:'UDP :53',color:C.request,inner:true},
+        pod:{x:1030,y:395,w:165,h:78,label:'DNS Pod',sublabel:'TCP + UDP :53',color:C.request,inner:true}
+      },{
+        client:concept('DNS client','A DNS query over UDP is a datagram and uses the same numeric port as the TCP example.'),
+        cluster:concept('Kubernetes cluster','Separate TCP and UDP Services target the same DNS Pod. Co-hosting TCP and UDP Listeners on one Gateway address depends on implementation support.'),
+        gateway:tip('Gateway: DNS listeners','The protocol distinguishes two Listeners sharing port 53.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: dns
+  namespace: dns
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: dns-tcp
+      protocol: TCP
+      port: 53
+      allowedRoutes:
+        kinds:
+          - kind: TCPRoute
+    - name: dns-udp
+      protocol: UDP
+      port: 53
+      allowedRoutes:
+        kinds:
+          - kind: UDPRoute`,[['Implementation support','TCP + UDP on one Gateway address is optional']]),
+        route:tip('UDPRoute: dns-udp','UDPRoute selects a Listener using parentRefs.sectionName and forwards datagrams. It has no hostnames, matches, or filters.',`apiVersion: gateway.networking.k8s.io/v1
+kind: UDPRoute
+metadata:
+  name: dns-udp
+  namespace: dns
+spec:
+  parentRefs:
+    - name: dns
+      sectionName: dns-udp
+  rules:
+    - backendRefs:
+        - name: dns-udp
+          port: 53`,[['Transport','UDP datagram'],['Gateway port','53']]),
+        service:tip('Service: dns-udp','Separate UDP Service targets the DNS Pod UDP port.',serviceYaml({name:'dns-udp',app:'dns',namespace:'dns',port:53,targetPort:'dns-udp',protocol:'UDP',portName:'dns-udp'})),
+        pod:tip('DNS Pod','The illustrative DNS Pod exposes distinct TCP and UDP container ports.',podYaml({name:'dns-pod',app:'dns',namespace:'dns',ports:[{name:'dns-tcp',port:53,protocol:'TCP'},{name:'dns-udp',port:53,protocol:'UDP'}]}))
+      },[
+        arrow('The client sends a UDP datagram to Gateway port 53.','client','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        light('The Gateway selects its UDP Listener, not the TCP Listener.','gateway','UDP'),
+        light('UDPRoute attaches to dns-udp by sectionName.','route'),
+        arrow('The Gateway forwards the datagram to the UDP Service.','gateway','service',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects the DNS Pod UDP port.','service','pod',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The DNS response returns as a UDP datagram.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The Gateway relays the datagram to the client.','service','gateway',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives the DNS response.','gateway','client',C.response,6,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('DNS query','keep','query'),line('Transport: UDP','highlight','protocol'),line('Destination: :53','keep','port')],body:[],cycleState:[]}}),
+
+      'shared-accepted': base('shared-accepted','Shared Gateway · permitted Route',{
+        cluster:{x:175,y:130,w:1050,h:710,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:22,y:430,w:135,h:70,label:'Web client',sublabel:'app.example.com',color:C.infra},
+        infraNs:{x:230,y:175,w:175,h:68,label:'Namespace: infra',sublabel:'Gateway owner',color:C.infra,inner:true},
+        teamANs:{x:490,y:175,w:185,h:68,label:'Namespace: team-a',sublabel:'gateway-access: shared',color:C.infra,inner:true},
+        teamBNs:{x:850,y:175,w:185,h:68,label:'Namespace: team-b',sublabel:'gateway-access: restricted',color:C.infra,inner:true},
+        gateway:{x:230,y:405,w:205,h:82,label:'Gateway: shared',sublabel:'allowedRoutes: selector',color:C.gateway,inner:true},
+        route:{x:500,y:365,w:205,h:78,label:'HTTPRoute: team-a',sublabel:'parent: infra · app-svc',color:C.request,inner:true},
+        service:{x:515,y:610,w:185,h:76,label:'Service: app-svc',sublabel:'team-a :8080',color:C.request,inner:true},
+        pod:{x:840,y:610,w:175,h:76,label:'Team-a Pod',sublabel:'app: app',color:C.request,inner:true}
+      },{
+        client:concept('Web client','Sends traffic for the hostname accepted by the Gateway Listener.'),
+        cluster:concept('Kubernetes cluster','Listener.allowedRoutes controls Route attachment. Kubernetes RBAC separately controls who may create or change resources.'),
+        infraNs:tip('Namespace: infra','The shared Gateway lives in infra.',`apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra`),
+        teamANs:tip('Namespace: team-a','This namespace label matches the Gateway Listener selector, so its HTTPRoutes may attach.',`apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+  labels:
+    gateway-access: shared`),
+        teamBNs:tip('Namespace: team-b','This namespace label does not match the Gateway Listener selector; its Routes cannot attach.',`apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-b
+  labels:
+    gateway-access: restricted`),
+        gateway:tip('Gateway: shared','The Listener accepts HTTPRoutes only from namespaces labeled gateway-access=shared.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shared
+  namespace: infra
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: web
+      hostname: app.example.com
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: shared`,[['Route policy','Listener namespace selector'],['RBAC','Separate permission control']]),
+        route:tip('HTTPRoute: team-a','A Route in team-a references the Gateway in infra. The namespace label satisfies allowedRoutes, so the Gateway accepts it.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app
+  namespace: team-a
+spec:
+  parentRefs:
+    - name: shared
+      namespace: infra
+      sectionName: web
+  hostnames:
+    - app.example.com
+  rules:
+    - backendRefs:
+        - name: app-svc
+          port: 8080
+status:
+  parents:
+    - parentRef:
+        name: shared
+        namespace: infra
+        sectionName: web
+      controllerName: example.net/gateway-controller
+      conditions:
+        - type: Accepted
+          status: "True"
+          reason: Accepted`,[['Attachment','Accepted']]),
+        service:tip('Service: team-a/app-svc','Backend Service for the accepted Route; the reference stays within team-a.',serviceYaml({name:'app-svc',app:'app',namespace:'team-a'})),
+        pod:tip('Team-a Pod','Illustrative workload selected by team-a/app-svc.',podYaml({name:'app-pod',app:'app',namespace:'team-a'}))
+      },[
+        light('The Gateway lives in infra; its Listener permits selected namespaces.','gateway'),
+        light('team-a has the matching label, so its HTTPRoute is Accepted.','route'),
+        arrow('A client request arrives at the shared Gateway.','client','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        arrow('The Gateway applies the accepted team-a Route and forwards to its Service.','gateway','service',C.request,2,{fromRight:true,toLeft:true}),
+        arrow('The Service selects a Pod in team-a.','service','pod',C.request,3,{fromRight:true,toLeft:true}),
+        arrow('The application response returns to the Gateway.','pod','service',C.response,4,{fromLeft:true,toRight:true}),
+        arrow('The Gateway relays the response to the client.','service','gateway',C.response,5,{fromLeft:true,toRight:true}),
+        arrow('The client receives the response.','gateway','client',C.response,6,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('GET / HTTP/1.1','keep','request'),line('Host: app.example.com','keep','host')],body:[],cycleState:[]}}),
+
+      'shared-rejected': base('shared-rejected','Shared Gateway · rejected Route',{
+        cluster:{x:175,y:130,w:1050,h:710,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
+        client:{x:22,y:430,w:135,h:70,label:'Web client',sublabel:'app.example.com',color:C.infra},
+        infraNs:{x:230,y:175,w:175,h:68,label:'Namespace: infra',sublabel:'Gateway owner',color:C.infra,inner:true},
+        teamBNs:{x:500,y:175,w:185,h:68,label:'Namespace: team-b',sublabel:'gateway-access: restricted',color:C.infra,inner:true},
+        gateway:{x:245,y:405,w:205,h:82,label:'Gateway: shared',sublabel:'listener: app.example.com',color:C.gateway,inner:true},
+        route:{x:555,y:360,w:225,h:84,label:'HTTPRoute: team-b',sublabel:'attachment denied',color:C.error,inner:true},
+        service:{x:865,y:600,w:185,h:76,label:'Service: app-svc',sublabel:'team-b :8080',color:C.infra,inner:true}
+      },{
+        client:concept('Web client','The request has no accepted matching Route, so the HTTP Gateway returns 404.'),
+        cluster:concept('Kubernetes cluster','The Route is rejected at attachment time. Its backend reference may resolve, but the Gateway will not route through this Route.'),
+        infraNs:tip('Namespace: infra','The shared Gateway lives in infra.',`apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra`),
+        teamBNs:tip('Namespace: team-b','This label does not match the Gateway Listener selector.',`apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-b
+  labels:
+    gateway-access: restricted`),
+        gateway:tip('Gateway: shared','The Listener permits only HTTPRoutes from namespaces labeled gateway-access=shared.',`apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shared
+  namespace: infra
+spec:
+  gatewayClassName: example
+  listeners:
+    - name: web
+      hostname: app.example.com
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        kinds:
+          - kind: HTTPRoute
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: shared`),
+        route:tip('HTTPRoute: team-b','The Route references the infra Gateway, but the Listener rejects attachment because team-b does not match its namespace selector. NotAllowedByListeners is the standard Accepted condition reason.',`apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app
+  namespace: team-b
+spec:
+  parentRefs:
+    - name: shared
+      namespace: infra
+      sectionName: web
+  hostnames:
+    - app.example.com
+  rules:
+    - backendRefs:
+        - name: app-svc
+          port: 8080
+status:
+  parents:
+    - parentRef:
+        name: shared
+        namespace: infra
+        sectionName: web
+      controllerName: example.net/gateway-controller
+      conditions:
+        - type: Accepted
+          status: "False"
+          reason: NotAllowedByListeners`,[['Accepted','False'],['Reason','NotAllowedByListeners']]),
+        service:tip('Service: team-b/app-svc','The Route references this same-namespace Service, but backend resolution does not override a rejected Gateway attachment.',serviceYaml({name:'app-svc',app:'app',namespace:'team-b'}))
+      },[
+        light('team-b does not match the Gateway Listener namespace selector.','teamBNs','No'),
+        light('The Gateway rejects attachment: Accepted=False, NotAllowedByListeners.','route','No'),
+        arrow('A client request reaches the Gateway, but no accepted Route matches it.','client','gateway',C.request,1,{fromRight:true,toLeft:true}),
+        arrow('The HTTP Gateway returns 404; the rejected Route backend is not used.','gateway','client',C.error,2,{fromLeft:true,toRight:true})
+      ],{initialState:{phase:'request',headers:[line('GET / HTTP/1.1','keep','request'),line('Host: app.example.com','keep','host')],body:[],cycleState:[]},mutations:{'shared-rejected':[{step:4,label:'No accepted Route; Gateway returns 404',phase:'response',replaceHeaders:[line('HTTP/1.1 404 Not Found','err','status'),line('Reason: no matching attached Route','del','reason')]}]}})
+    };
+
+    const configLinks = {
+      'ingress-before': [['ingressClass','controller'],['ingress','ingressClass'],['ingress','service']],
+      'ingress-after': [['gatewayClass','gateway'],['route','gateway'],['route','service']],
+      'gateway-basics': [['gatewayClass','gateway'],['route','gateway'],['route','service']],
+      'http-match': [['route','gateway'],['route','service']],
+      'http-filter-rewrite': [['route','gateway'],['route','filter',C.filter],['route','service']],
+      'http-redirect': [['redirectRoute','gateway'],['httpsRoute','gateway'],['httpsRoute','service'],['gateway','secret',C.tls]],
+      'http-split': [['route','gateway'],['route','stable'],['route','canary']],
+      'grpc-method': [['route','gateway'],['route','service'],['gateway','secret',C.tls]],
+      'tls-terminate': [['route','gateway'],['route','service'],['gateway','secret',C.tls]],
+      'tls-passthrough': [['route','gateway'],['route','service']],
+      'tcp-dns': [['route','gateway'],['route','service']],
+      'udp-dns': [['route','gateway'],['route','service']],
+      'shared-accepted': [['infraNs','gateway'],['teamANs','route'],['route','gateway'],['route','service']],
+      'shared-rejected': [['infraNs','gateway'],['teamBNs','route',C.error],['route','gateway',C.error],['route','service']]
+    };
+    function drawConfigLinks(ctx, engine, nodes, links) {
+      const edge = (from, to) => {
+        const dx = to.x + to.w / 2 - (from.x + from.w / 2);
+        const dy = to.y + to.h / 2 - (from.y + from.h / 2);
+        const fromT = Math.min(dx ? from.w / 2 / Math.abs(dx) : Infinity, dy ? from.h / 2 / Math.abs(dy) : Infinity);
+        const toT = Math.min(dx ? to.w / 2 / Math.abs(dx) : Infinity, dy ? to.h / 2 / Math.abs(dy) : Infinity);
+        return [
+          { x:from.x + from.w / 2 + dx * fromT, y:from.y + from.h / 2 + dy * fromT },
+          { x:to.x + to.w / 2 - dx * toT, y:to.y + to.h / 2 - dy * toT }
+        ];
+      };
+      ctx.save();
+      ctx.globalAlpha = .72;
+      ctx.lineWidth = Math.max(1, engine.ts(1.5));
+      ctx.setLineDash([engine.ts(7), engine.ts(5)]);
+      for (const [fromKey, toKey, color = C.infra] of links) {
+        const from = nodes[fromKey], to = nodes[toKey];
+        if (!from || !to) continue;
+        const [start, end] = edge(from, to);
+        ctx.beginPath();
+        ctx.moveTo(engine.tx(start.x), engine.ty(start.y));
+        ctx.lineTo(engine.tx(end.x), engine.ty(end.y));
+        ctx.strokeStyle = color;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    const choices = [
+      {key:'gateway-basics',label:'Gateway · resource model'},
+      {key:'ingress-before',label:'Ingress · before'},
+      {key:'ingress-after',label:'Gateway API · after Ingress'},
+      {key:'http-match',label:'HTTPRoute · host + path'},
+      {key:'http-filter-rewrite',label:'HTTPRoute · headers + rewrite'},
+      {key:'http-redirect',label:'HTTPRoute · redirect'},
+      {key:'http-split',label:'HTTPRoute · weighted split'},
+      {key:'grpc-method',label:'GRPCRoute · service + method'},
+      {key:'tls-terminate',label:'HTTPS · termination'},
+      {key:'tls-passthrough',label:'TLSRoute · SNI passthrough'},
+      {key:'tcp-dns',label:'TCPRoute · DNS/TCP :53'},
+      {key:'udp-dns',label:'UDPRoute · DNS/UDP :53'},
+      {key:'shared-accepted',label:'Shared Gateway · permitted Route'},
+      {key:'shared-rejected',label:'Shared Gateway · rejected Route'}
+    ];
+    const byId = id => document.getElementById(id);
+    const flowSelect = byId('fs-flow-select');
+    const playBtn = byId('fs-play');
+    const speedSelect = byId('fs-speed');
+    const modeBtn = byId('fs-mode');
+    const resetBtn = byId('fs-reset');
+    const panelContent = byId('fs-panel-content');
+    const canvasHost = byId('fs-canvas-host');
+    const overlayHost = byId('fs-overlay-host');
+    const themeBtn = byId('fs-theme');
+    const sidebarBtn = byId('fs-panel-toggle');
+    let activeViz = null;
+    let activeKey = null;
+    let loadSequence = 0;
+    let rotationTimer = null;
+    let playbackMode = 'loop';
+    let sidebarCollapsed = false;
+    let isDark = true;
+
+    for (const choice of choices) {
+      const option = document.createElement('option');
+      option.value = choice.key;
+      option.textContent = choice.label;
+      flowSelect.append(option);
+    }
+
+    const escapeHtml = value => value.replace(/[&<>]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[character]));
+    const highlightYaml = source => source.split('\n').map(text => {
+      if (/^\s*#/.test(text)) return `<span class="fs-yaml-comment">${escapeHtml(text)}</span>`;
+      const match = text.match(/^(\s*(?:-\s+)?)([^:\s][^:]*)(:)(.*)$/);
+      if (!match) return escapeHtml(text);
+      const [,indent,key,colon,value] = match;
+      const scalar = value.trim();
+      const cls = key.trim() === 'kind' ? 'fs-yaml-kind'
+        : key.trim() === 'apiVersion' || /^(true|false|null|\d+)$/.test(scalar) ? 'fs-yaml-literal'
+        : 'fs-yaml-string';
+      return `${escapeHtml(indent).replace('-', '<span class="fs-yaml-punctuation">-</span>')}<span class="fs-yaml-key">${escapeHtml(key)}</span><span class="fs-yaml-punctuation">${colon}</span><span class="${cls}">${escapeHtml(value)}</span>`;
+    }).join('\n');
+
+    function clearRotation() {
+      if (rotationTimer !== null) clearTimeout(rotationTimer);
+      rotationTimer = null;
+    }
+    function updatePlayButton() {
+      playBtn.innerHTML = activeViz && (activeViz.state.running || activeViz.state.paused)
+        ? '&#9646;&#9646; Pause' : '&#9654; Start';
+    }
+    function makePanel() {
+      panelContent.replaceChildren();
+      const steps = document.createElement('div');
+      steps.className = 'fs-steps';
+      steps.innerHTML = '<div class="fs-steps-title">Flow Steps <span style="font-weight:400;font-size:11px;color:var(--fs-text-dim)">· click to jump</span></div><div class="fs-steps-container"></div>';
+      const inspector = document.createElement('div');
+      inspector.className = 'fs-inspector';
+      inspector.innerHTML = '<div class="fs-inspector-title" style="color:var(--fs-accent)">Request</div><div class="fs-inspector-content"></div>';
+      panelContent.append(steps, inspector);
+      return {
+        stepsContainer:steps.querySelector('.fs-steps-container'),
+        inspectorTitle:inspector.querySelector('.fs-inspector-title'),
+        inspectorContent:inspector.querySelector('.fs-inspector-content')
+      };
+    }
+    function makeCanvas() {
+      const canvas = document.createElement('canvas');
+      canvas.id = 'fs-canvas';
+      canvasHost.replaceChildren(canvas);
+      return canvas;
+    }
+    function makeOverlay() {
+      overlayHost.innerHTML = `
+        <div id="fs-highlight-box" style="display:none;position:fixed;border-radius:10px;pointer-events:none"></div>
+        <div id="fs-overlay" style="display:none;position:fixed;top:0;left:0;right:380px;bottom:0;background:rgba(0,0,0,.6)">
+          <div id="fs-overlay-card" style="position:absolute;border:1px solid var(--fs-border);border-radius:14px;padding:22px 26px">
+            <button id="fs-overlay-close" type="button" aria-label="Close resource details" style="position:absolute;top:10px;right:14px;background:none;border:none;font-size:18px;cursor:pointer;padding:4px 8px">✕</button>
+            <div id="fs-overlay-accent" style="width:4px;height:24px;border-radius:2px;position:absolute;left:0;top:22px"></div>
+            <h2 id="fs-overlay-title" style="margin:0 0 6px;font-size:18px;font-family:system-ui"></h2>
+            <p id="fs-overlay-desc" style="margin:0 0 14px;font-size:14px;line-height:1.5;font-family:system-ui"></p>
+            <div id="fs-overlay-details" style="font-size:13px;font-family:SFMono-Regular,Consolas,monospace"></div>
+            <button id="fs-overlay-resume" type="button" style="margin-top:14px;padding:7px 20px;border:1px solid var(--fs-success);border-radius:8px;background:transparent;color:var(--fs-success);font-size:13px;cursor:pointer;font-family:system-ui">Close / resume</button>
+          </div>
+        </div>`;
+      const find = selector => overlayHost.querySelector(selector);
+      return {
+        overlay:find('#fs-overlay'), overlayCard:find('#fs-overlay-card'),
+        overlayTitle:find('#fs-overlay-title'), overlayDesc:find('#fs-overlay-desc'),
+        overlayDetails:find('#fs-overlay-details'), overlayAccent:find('#fs-overlay-accent'),
+        overlayClose:find('#fs-overlay-close'), overlayResume:find('#fs-overlay-resume'),
+        highlightBox:find('#fs-highlight-box')
+      };
+    }
+    function fitOverlay() {
+      const card = overlayHost.querySelector('#fs-overlay-card');
+      const backdrop = overlayHost.querySelector('#fs-overlay');
+      if (!card || backdrop.style.display === 'none') return;
+      const right = innerWidth - (sidebarCollapsed ? 0 : 380) - 10;
+      const left = Number.parseFloat(card.style.left) || 10;
+      const top = Number.parseFloat(card.style.top) || 10;
+      card.style.left = `${Math.max(10,Math.min(left,right-card.offsetWidth))}px`;
+      card.style.top = `${Math.max(10,Math.min(top,innerHeight-card.offsetHeight-10))}px`;
+    }
+    function nextChoice(key) {
+      const index = choices.findIndex(choice => choice.key === key);
+      return choices[(index + 1) % choices.length].key;
+    }
+    function scheduleNext(key) {
+      clearRotation();
+      if (playbackMode !== 'rotate') return;
+      rotationTimer = setTimeout(() => {
+        rotationTimer = null;
+        if (playbackMode !== 'rotate' || activeKey !== key || activeViz?._overlay?.isOpen) return;
+        const next = nextChoice(key);
+        flowSelect.value = next;
+        loadScenario(next);
+      },1800);
+    }
+    function stopActive() {
+      clearRotation();
+      const previous = activeViz;
+      activeViz = null;
+      if (!previous) return;
+      previous.closeOverlay();
+      clearRotation();
+      previous.reset();
+      previous._engine.stop();
+    }
+    async function loadScenario(key) {
+      const sequence = ++loadSequence;
+      stopActive();
+      if (!diagrams[key]) return;
+      activeKey = key;
+      flowSelect.value = key;
+      playBtn.innerHTML = '&#9654; Start';
+      const diagram = { ...diagrams[key], theme:isDark ? 'dark' : 'light' };
+      const panel = makePanel();
+      const canvas = makeCanvas();
+      const overlay = makeOverlay();
+      const viz = new FlowStory(canvas, {
+        panelWidth:sidebarCollapsed ? 0 : 380,
+        stepsContainer:panel.stepsContainer,
+        inspectorTitle:panel.inspectorTitle,
+        inspectorContent:panel.inspectorContent,
+        overlay:overlay.overlay,
+        overlayCard:overlay.overlayCard,
+        overlayTitle:overlay.overlayTitle,
+        overlayDesc:overlay.overlayDesc,
+        overlayDetails:overlay.overlayDetails,
+        overlayAccent:overlay.overlayAccent,
+        overlayClose:overlay.overlayClose,
+        overlayResume:overlay.overlayResume,
+        highlightBox:overlay.highlightBox,
+        brand:byId('fs-brand'), title:byId('fs-title'), legend:byId('fs-legend')
+      });
+      activeViz = viz;
+      try {
+        await viz.load(diagram);
+        if (sequence !== loadSequence) {
+          viz.reset();
+          viz._engine.stop();
+          return;
+        }
+        const draw = viz._engine.onDraw;
+        viz._engine.onDraw = (ctx, state, engine) => {
+          draw(ctx, state, engine);
+          drawConfigLinks(ctx, engine, diagram.nodes, configLinks[key] || []);
+        };
+        viz.setSpeed(Number(speedSelect.value));
+        viz.state.loopMode = playbackMode === 'loop';
+        window.__flowstory = viz;
+
+        const show = viz._overlay.show.bind(viz._overlay);
+        viz._overlay.show = (...args) => {
+          clearRotation();
+          show(...args);
+          const tooltip = args[2];
+          if (tooltip?.yaml) {
+            const code = document.createElement('pre');
+            code.className = 'fs-yaml';
+            code.innerHTML = highlightYaml(tooltip.yaml);
+            overlay.overlayDetails.append(code);
+          }
+          updatePlayButton();
+          requestAnimationFrame(fitOverlay);
+        };
+        const close = viz._overlay.close.bind(viz._overlay);
+        viz._overlay.close = (...args) => {
+          close(...args);
+          updatePlayButton();
+          const steps = viz.state.flows[viz.state.activeFlow] || [];
+          if (playbackMode === 'rotate' && viz.state.stepIndex >= steps.length) scheduleNext(key);
+        };
+        viz._playback.onChange(event => {
+          if (viz !== activeViz) return;
+          if (event === 'play' || event === 'resume') playBtn.innerHTML = '&#9646;&#9646; Pause';
+          if (event === 'pause' || event === 'reset') playBtn.innerHTML = '&#9654; Start';
+          if (event === 'reset') {
+            const steps = viz.state.flows[viz.state.activeFlow] || [];
+            if (playbackMode === 'rotate' && viz.state.stepIndex >= steps.length) scheduleNext(key);
+          }
+        });
+        viz.play();
+      } catch (error) {
+        if (sequence !== loadSequence) return;
+        panel.stepsContainer.innerHTML = `<div id="fs-error">Could not load this diagram: ${escapeHtml(error.message)}</div>`;
+        console.error('Gateway API diagram load error:', error);
+      }
+    }
+
+    flowSelect.addEventListener('change', () => loadScenario(flowSelect.value));
+    playBtn.addEventListener('click', () => {
+      if (!activeViz) return;
+      clearRotation();
+      activeViz.play();
+      updatePlayButton();
+    });
+    speedSelect.addEventListener('change', () => activeViz?.setSpeed(Number(speedSelect.value)));
+    resetBtn.addEventListener('click', () => {
+      clearRotation();
+      activeViz?.reset();
+      updatePlayButton();
+    });
+    modeBtn.addEventListener('click', () => {
+      if (activeViz?._overlay?.isOpen) activeViz.closeOverlay();
+      playbackMode = playbackMode === 'loop' ? 'rotate' : 'loop';
+      modeBtn.textContent = playbackMode === 'loop' ? '↻ Loop selection' : '↻ Rotate all';
+      modeBtn.setAttribute('aria-pressed',String(playbackMode === 'rotate'));
+      modeBtn.title = playbackMode === 'loop'
+        ? 'Loop the selected workflow; click to rotate through all workflows'
+        : 'Rotate through every workflow; click to loop only the selected workflow';
+      clearRotation();
+      if (activeViz) {
+        activeViz.reset();
+        activeViz.state.loopMode = playbackMode === 'loop';
+        activeViz.play();
+      }
+    });
+    themeBtn.addEventListener('click', () => {
+      if (!activeViz) return;
+      activeViz.toggleTheme();
+      isDark = !document.body.classList.contains('light');
+      themeBtn.innerHTML = isDark ? '&#9790;' : '&#9788;';
+      themeBtn.setAttribute('aria-label',isDark ? 'Switch to light theme' : 'Switch to dark theme');
+    });
+    sidebarBtn.addEventListener('click', () => {
+      sidebarCollapsed = document.body.classList.toggle('sidebar-collapsed');
+      sidebarBtn.innerHTML = sidebarCollapsed ? '&#8249;' : '&#8250;';
+      sidebarBtn.setAttribute('aria-label',sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar');
+      sidebarBtn.setAttribute('title',sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar');
+      sidebarBtn.setAttribute('aria-expanded',String(!sidebarCollapsed));
+      if (activeViz) {
+        activeViz._engine.panelWidth = sidebarCollapsed ? 0 : 380;
+        activeViz._engine.resize();
+      }
+      requestAnimationFrame(fitOverlay);
+    });
+    window.addEventListener('resize',fitOverlay);
+
+    console.assert(Object.keys(diagrams).length === choices.length,'Every selectable workflow must have an inline diagram.');
+    console.assert(choices.every(choice => diagrams[choice.key]?.flows?.[choice.key]),'Every workflow must have a matching FlowStory flow.');
+    loadScenario('gateway-basics');
+  </script>
+</body>
+</html>
