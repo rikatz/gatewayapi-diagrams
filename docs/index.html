@@ -8,6 +8,11 @@
   <link rel="stylesheet" href="https://noyitz.github.io/flowstory/templates/style.css">
   <style>
     .fs-panel { transition: transform .2s ease, background .3s, border-color .3s; }
+    .fs-brand { gap: 8px; }
+    .fs-brand img.gateway-api-logo { display: block; height: clamp(52px, 4.1vw, 79px); width: auto; max-width: 410px; object-fit: contain; }
+    .fs-brand img.gateway-api-logo-light { display: none; }
+    body.light .fs-brand .gateway-api-logo-dark { display: none; }
+    body.light .fs-brand .gateway-api-logo-light { display: block; }
     .fs-flow-bar { gap: 8px; }
     #fs-flow-select { flex: 1 0 100%; width: 100%; min-width: 0; }
     .fs-flow-bar #fs-speed { flex: 0 0 70px; width: 70px; }
@@ -63,13 +68,17 @@
 <body>
   <button class="fs-theme-toggle" id="fs-theme" type="button" aria-label="Toggle theme">&#9790;</button>
   <button id="fs-panel-toggle" type="button" aria-label="Hide sidebar" aria-expanded="true" title="Hide sidebar">&#8250;</button>
-  <div class="fs-brand" id="fs-brand"></div><div class="fs-title" id="fs-title"></div>
+  <div class="fs-brand" id="fs-brand">
+    <img class="gateway-api-logo gateway-api-logo-dark" src="images/gateway-api-logo-text-horizontal-dark.png" alt="Gateway API">
+    <img class="gateway-api-logo gateway-api-logo-light" src="images/gateway-api-logo-text-horizontal.png" alt="Gateway API">
+  </div>
+  <div class="fs-title" id="fs-title"></div>
   <aside class="fs-panel" aria-label="Diagram controls and details">
     <div class="fs-flow-bar">
       <select id="fs-flow-select" aria-label="Select Gateway API diagram or workflow"></select>
       <button class="fs-start" id="fs-play" type="button">&#9654; Start</button>
       <select id="fs-speed" aria-label="Playback speed">
-        <option value="1">1×</option><option value="2" selected>2×</option><option value="4">4×</option>
+        <option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
       </select>
       <button id="fs-mode" type="button" aria-pressed="false" title="Loop this workflow or rotate through all workflows">&#8635; Loop selection</button>
       <button class="fs-reset" id="fs-reset" type="button">Reset</button>
@@ -183,7 +192,7 @@ spec:
         arrow('The client receives the HTTP response.','controller','client',C.response,6,{fromLeft:true,toRight:true})
       ], { initialState:{phase:'request',headers:[line('GET /shop/items HTTP/1.1','keep','request'),line('Host: shop.example.com','keep','host')],body:[],cycleState:[]} }),
 
-      'ingress-after': base('ingress-after','Ingress · Gateway API equivalent',{
+      'ingress-after': base('ingress-after','Ingress · after',{
         cluster:{x:185,y:155,w:1030,h:680,type:'boundary',label:'Kubernetes cluster',color:C.infra,labelAlign:'left'},
         client:{x:24,y:405,w:138,h:72,label:'Web client',sublabel:'outside the cluster',color:C.infra},
         gatewayClass:{x:230,y:225,w:190,h:76,label:'GatewayClass',sublabel:'selects controller',color:C.infra,inner:true},
@@ -1109,7 +1118,7 @@ status:
     const choices = [
       {key:'gateway-basics',label:'Gateway · resource model'},
       {key:'ingress-before',label:'Ingress · before'},
-      {key:'ingress-after',label:'Gateway API · after Ingress'},
+      {key:'ingress-after',label:'Ingress · after'},
       {key:'http-match',label:'HTTPRoute · host + path'},
       {key:'http-filter-rewrite',label:'HTTPRoute · headers + rewrite'},
       {key:'http-redirect',label:'HTTPRoute · redirect'},
@@ -1274,6 +1283,10 @@ status:
         highlightBox:overlay.highlightBox,
         brand:byId('fs-brand'), title:byId('fs-title'), legend:byId('fs-legend')
       });
+      const workflowTitle = diagram.flows[key].label;
+      viz._updateFlowLabel = () => {
+        if (viz._titleEl) viz._titleEl.textContent = workflowTitle;
+      };
       activeViz = viz;
       try {
         await viz.load(diagram);
