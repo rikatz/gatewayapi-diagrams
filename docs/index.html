@@ -63,6 +63,17 @@
     body.sidebar-collapsed .fs-title { right:0; }
     body.sidebar-collapsed #fs-overlay { right:0 !important; }
     #fs-error { margin:16px; color:var(--fs-error); font:13px/1.5 monospace; white-space:pre-wrap; }
+    .fs-credit {
+      position:fixed; left:16px; bottom:14px; z-index:260;
+      display:inline-flex; align-items:center; gap:6px;
+      padding:6px 10px; border:1px solid var(--fs-border); border-radius:999px;
+      background:var(--fs-bg-surface); color:var(--fs-text-dim);
+      font:600 11px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      letter-spacing:.02em; text-decoration:none;
+      box-shadow:0 4px 16px rgba(0,0,0,.18); backdrop-filter:blur(8px);
+    }
+    .fs-credit:hover { color:#58a6ff; border-color:#58a6ff; }
+    body.light .fs-credit { box-shadow:0 4px 16px rgba(0,0,0,.08); }
   </style>
 </head>
 <body>
@@ -88,6 +99,7 @@
   <div id="fs-canvas-host"></div>
   <div class="fs-legend" id="fs-legend"></div>
   <div id="fs-overlay-host"></div>
+  <a class="fs-credit" href="https://noyitz.github.io/flowstory/" target="_blank" rel="noopener">Built with FlowStory</a>
 
   <script type="module">
     import { FlowStory } from 'https://noyitz.github.io/flowstory/src/index.js';
